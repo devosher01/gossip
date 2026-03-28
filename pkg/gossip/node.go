@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
@@ -32,40 +33,89 @@ type MembershipPayload struct {
 
 type DataPayload struct {
 	Clocks map[string]uint64 `json:"clocks"`
-	State  map[string]uint64 `json:"state"` // G-Counter state
+	State  map[string]uint64 `json:"state"`
+}
+
+type Config struct {
+	ID             string
+	BindAddr       string
+	Port           int
+	GossipInterval time.Duration
+	SuspectTimeout time.Duration
+	DeadTimeout    time.Duration
+	RemoveTimeout  time.Duration
+	FanOut         int
+	Logger         *slog.Logger
+}
+
+func DefaultConfig(id string, port int) Config {
+	return Config{
+		ID:             id,
+		BindAddr:       "127.0.0.1",
+		Port:           port,
+		GossipInterval: 1 * time.Second,
+		SuspectTimeout: 5 * time.Second,
+		DeadTimeout:    10 * time.Second,
+		RemoveTimeout:  30 * time.Second,
+		FanOut:         3,
+		Logger:         slog.Default(),
+	}
 }
 
 type Node struct {
 	ID        string
 	Addr      string
-	Transport *network.UDPTransport
+	Transport network.Transport
 	Members   *membership.List
 	Counter   *data.GCounter
 	Clocks    *data.VectorClock
 
-	mu sync.Mutex
+	cfg    Config
+	log    *slog.Logger
+	cancel context.CancelFunc
+	mu     sync.Mutex
+
+	// heartbeatSeq is a monotonic counter incremented each gossip tick.
+	// Using a sequence number instead of wall clock avoids issues with
+	// NTP adjustments moving time backwards.
+	heartbeatSeq uint64
 }
 
-func NewNode(id string, port int) (*Node, error) {
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	transport, err := network.NewUDPTransport(port)
+func NewNode(cfg Config) (*Node, error) {
+	addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port)
+	transport, err := network.NewUDPTransport(cfg.Port)
 	if err != nil {
 		return nil, err
 	}
 
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
+
 	return &Node{
-		ID:        id,
+		ID:        cfg.ID,
 		Addr:      addr,
 		Transport: transport,
 		Members:   membership.NewList(addr),
 		Counter:   data.NewGCounter(),
 		Clocks:    data.NewVectorClock(),
+		cfg:       cfg,
+		log:       log.With("node", cfg.ID),
 	}, nil
 }
 
 func (n *Node) Start(ctx context.Context) {
+	ctx, n.cancel = context.WithCancel(ctx)
 	go n.listen(ctx)
 	go n.gossipLoop(ctx)
+}
+
+func (n *Node) Stop() error {
+	if n.cancel != nil {
+		n.cancel()
+	}
+	return n.Transport.Close()
 }
 
 func (n *Node) listen(ctx context.Context) {
@@ -74,64 +124,97 @@ func (n *Node) listen(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			addr, buf, err := n.Transport.Receive(ctx)
-			if err != nil {
-				continue
-			}
-			var env Envelope
-			if err := json.Unmarshal(buf, &env); err != nil {
-				continue
-			}
+		}
 
-			switch env.Type {
-			case MembershipSync:
-				var p MembershipPayload
-				err := json.Unmarshal(env.Payload, &p)
-				if err != nil {
-					return
-				}
-				for _, m := range p.Members {
-					n.Members.UpdateHeartbeat(m.Addr, m.Heartbeat)
-				}
-			case DataSync:
-				var p DataPayload
-				err := json.Unmarshal(env.Payload, &p)
-				if err != nil {
-					return
-				}
-				_ = n.Clocks.Merge(p.Clocks)
-				_ = n.Counter.Merge(p.State)
+		_, buf, err := n.Transport.Receive(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
 			}
-			_ = addr
+			continue
+		}
+
+		var env Envelope
+		if err := json.Unmarshal(buf, &env); err != nil {
+			n.log.Warn("malformed envelope", "error", err)
+			continue
+		}
+
+		switch env.Type {
+		case MembershipSync:
+			n.handleMembership(env.Payload)
+		case DataSync:
+			n.handleData(env.Sender, env.Payload)
+		default:
+			n.log.Warn("unknown message type", "type", env.Type)
 		}
 	}
 }
 
+func (n *Node) handleMembership(payload json.RawMessage) {
+	var p MembershipPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		n.log.Warn("malformed membership payload", "error", err)
+		return
+	}
+	for _, m := range p.Members {
+		n.Members.UpdateHeartbeat(m.Addr, m.Heartbeat)
+	}
+}
+
+func (n *Node) handleData(sender string, payload json.RawMessage) {
+	var p DataPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		n.log.Warn("malformed data payload", "error", err)
+		return
+	}
+
+	// Compare causal ordering before merging.
+	// This is the entire point of vector clocks in a leaderless system:
+	// knowing whether remote state is causally ahead, behind, or concurrent
+	// determines whether this is a simple update or a true concurrent modification.
+	localClocks := n.Clocks.GetClocks()
+	ordering := data.CompareRaw(localClocks, p.Clocks)
+	n.log.Debug("merge",
+		"from", sender,
+		"ordering", ordering.String(),
+		"remote_counter", sumValues(p.State),
+		"local_counter", n.Counter.Value(),
+	)
+
+	_ = n.Clocks.Merge(p.Clocks)
+	_ = n.Counter.Merge(p.State)
+}
+
 func (n *Node) gossipLoop(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(n.cfg.GossipInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n.Members.UpdateHeartbeat(n.Addr, uint64(time.Now().Unix()))
-			n.Members.RemoveDead(10 * time.Second)
+			n.mu.Lock()
+			n.heartbeatSeq++
+			seq := n.heartbeatSeq
+			n.mu.Unlock()
+
+			n.Members.UpdateHeartbeat(n.Addr, seq)
+			n.Members.Tick(n.cfg.SuspectTimeout, n.cfg.DeadTimeout, n.cfg.RemoveTimeout)
 			n.gossip(ctx)
 		}
 	}
 }
 
 func (n *Node) gossip(ctx context.Context) {
-	members := n.Members.GetMembers()
+	members := n.Members.Snapshot()
 	if len(members) <= 1 {
 		return
 	}
 
-	// Select 3 random targets
-	targets := selectRandom(members, n.Addr, 3)
+	targets := selectRandom(members, n.Addr, n.cfg.FanOut)
 
-	// Prepare payloads
 	memPayload, err := json.Marshal(MembershipPayload{Members: members})
 	if err != nil {
 		return
@@ -146,8 +229,12 @@ func (n *Node) gossip(ctx context.Context) {
 	}
 
 	for _, t := range targets {
-		_ = n.send(ctx, t.Addr, MembershipSync, memPayload)
-		_ = n.send(ctx, t.Addr, DataSync, dataPayload)
+		if err := n.send(ctx, t.Addr, MembershipSync, memPayload); err != nil {
+			n.log.Debug("send membership failed", "peer", t.Addr, "error", err)
+		}
+		if err := n.send(ctx, t.Addr, DataSync, dataPayload); err != nil {
+			n.log.Debug("send data failed", "peer", t.Addr, "error", err)
+		}
 	}
 }
 
@@ -171,6 +258,9 @@ func (n *Node) Increment() error {
 	return n.Counter.Increment(n.ID, 1)
 }
 
+// selectRandom picks up to k random peers, excluding self.
+// Random peer selection is fundamental to gossip protocols: it guarantees
+// O(log N) convergence time with high probability (Demers et al., 1987).
 func selectRandom(members []membership.Member, self string, k int) []membership.Member {
 	var pool []membership.Member
 	for _, m := range members {
@@ -187,4 +277,12 @@ func selectRandom(members []membership.Member, self string, k int) []membership.
 		pool[i], pool[j] = pool[j], pool[i]
 	})
 	return pool[:k]
+}
+
+func sumValues(m map[string]uint64) uint64 {
+	var total uint64
+	for _, v := range m {
+		total += v
+	}
+	return total
 }
