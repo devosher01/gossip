@@ -78,7 +78,6 @@ func (vc *VectorClock) Merge(other map[string]uint64) error {
 	return nil
 }
 
-// MergeIter merges from an iterator without requiring a map allocation.
 func (vc *VectorClock) MergeIter(seq iter.Seq2[string, uint64]) {
 	vc.mu.Lock()
 	defer vc.mu.Unlock()
@@ -122,9 +121,8 @@ func (vc *VectorClock) Copy() *VectorClock {
 	}
 }
 
-// Compare determines the causal ordering between two vector clocks.
-// Returns Before if vc happened before other (all components <= and at least one <).
-// Concurrent means the events are causally independent — neither could have influenced the other.
+// Compare Before: all components <= and at least one <.
+// Concurrent: causally independent — neither could have influenced the other.
 func (vc *VectorClock) Compare(other *VectorClock) Ordering {
 	if other == nil {
 		return Concurrent
@@ -150,8 +148,6 @@ func (vc *VectorClock) IsConcurrentWith(other *VectorClock) bool {
 	return vc.Compare(other) == Concurrent
 }
 
-// CompareRaw compares two raw clock maps without requiring VectorClock instances.
-// Useful when comparing state received over the wire before merging.
 func CompareRaw(vc1, vc2 map[string]uint64) Ordering {
 	return compareClocks(vc1, vc2)
 }

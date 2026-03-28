@@ -54,7 +54,7 @@ func NewList(selfAddr string) *List {
 	return l
 }
 
-// UpdateHeartbeat uses monotonic counter comparison, not wall clock.
+// UpdateHeartbeat uses monotonic counter-comparison, not wall clock.
 // NTP adjustments can move wall clocks backwards; a counter only moves forward.
 func (l *List) UpdateHeartbeat(addr string, heartbeat uint64) {
 	l.mu.Lock()
@@ -78,8 +78,6 @@ func (l *List) UpdateHeartbeat(addr string, heartbeat uint64) {
 	}
 }
 
-// All yields every non-dead member without allocating a slice.
-// Callers that need a concrete slice for serialization should use Snapshot.
 func (l *List) All() iter.Seq[Member] {
 	return func(yield func(Member) bool) {
 		l.mu.RLock()
@@ -95,7 +93,6 @@ func (l *List) All() iter.Seq[Member] {
 	}
 }
 
-// Snapshot returns a copy of all non-dead members as a slice.
 func (l *List) Snapshot() []Member {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -136,9 +133,8 @@ func (l *List) MarkDead(addr string) bool {
 	return true
 }
 
-// Tick advances the SWIM state machine for all remote members.
-// Each state transition is driven by how long a member has been in its current state,
-// not by absolute timestamps — this makes the system independent of clock skew between nodes.
+// Tick State transitions use relative durations, not absolute timestamps,
+// so the system is independent of the clock skew between nodes.
 func (l *List) Tick(suspectTimeout, deadTimeout, removeTimeout time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

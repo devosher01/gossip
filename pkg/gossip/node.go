@@ -78,7 +78,7 @@ type Node struct {
 	mu        sync.Mutex
 
 	// heartbeatSeq is a monotonic counter incremented each gossip tick.
-	// Using a sequence number instead of wall clock avoids issues with
+	// Using a sequence number instead of a wall clock avoids issues with
 	// NTP adjustments moving time backwards.
 	heartbeatSeq uint64
 }
@@ -186,9 +186,8 @@ func (n *Node) handleData(sender string, payload json.RawMessage) {
 		return
 	}
 
-	// Compare causal ordering before merging.
 	// This is the entire point of vector clocks in a leaderless system:
-	// knowing whether remote state is causally ahead, behind, or concurrent
+	// knowing whether a remote state is causally ahead, behind, or concurrent
 	// determines whether this is a simple update or a true concurrent modification.
 	localClocks := n.Clocks.GetClocks()
 	ordering := data.CompareRaw(localClocks, p.Clocks)
@@ -283,9 +282,8 @@ func (n *Node) Increment() error {
 	return n.Counter.Increment(n.ID, 1)
 }
 
-// selectRandom picks up to k random peers, excluding self.
-// Random peer selection is fundamental to gossip protocols: it guarantees
-// O(log N) convergence time with high probability (Demers et al., 1987).
+// Random peer selection guarantees O(log N) convergence time
+// with high probability (Demers et al., 1987).
 func selectRandom(members []membership.Member, self string, k int) []membership.Member {
 	var pool []membership.Member
 	for _, m := range members {

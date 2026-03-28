@@ -12,8 +12,8 @@ import (
 )
 
 var (
-	ErrInvalidPort    = errors.New("invalid port number")
-	ErrInvalidAddress = errors.New("invalid network address")
+	ErrInvalidPort     = errors.New("invalid port number")
+	ErrInvalidAddress  = errors.New("invalid network address")
 	ErrMessageTooLarge = errors.New("message exceeds maximum transmission unit")
 	ErrTransportClosed = errors.New("transport is closed")
 )
@@ -28,8 +28,8 @@ type Transport interface {
 }
 
 type UDPTransport struct {
-	conn     *net.UDPConn
-	closed   atomic.Bool
+	conn      *net.UDPConn
+	closed    atomic.Bool
 	closeOnce sync.Once
 }
 
@@ -79,7 +79,12 @@ func (t *UDPTransport) Send(ctx context.Context, addr string, data []byte) error
 		if err := t.conn.SetWriteDeadline(deadline); err != nil {
 			return fmt.Errorf("set write deadline: %w", err)
 		}
-		defer t.conn.SetWriteDeadline(time.Time{})
+		defer func(conn *net.UDPConn, t time.Time) {
+			err := conn.SetWriteDeadline(t)
+			if err != nil {
+
+			}
+		}(t.conn, time.Time{})
 	}
 
 	n, err := t.conn.WriteToUDP(data, udpAddr)
@@ -108,7 +113,12 @@ func (t *UDPTransport) Receive(ctx context.Context) (string, []byte, error) {
 		if err := t.conn.SetReadDeadline(deadline); err != nil {
 			return "", nil, fmt.Errorf("set read deadline: %w", err)
 		}
-		defer t.conn.SetReadDeadline(time.Time{})
+		defer func(conn *net.UDPConn, t time.Time) {
+			err := conn.SetReadDeadline(t)
+			if err != nil {
+
+			}
+		}(t.conn, time.Time{})
 	}
 
 	n, addr, err := t.conn.ReadFromUDP(buf)
@@ -126,7 +136,6 @@ func (t *UDPTransport) Receive(ctx context.Context) (string, []byte, error) {
 		return "", nil, fmt.Errorf("read UDP: %w", err)
 	}
 
-	// Copy to decouple from the reusable buffer
 	received := make([]byte, n)
 	copy(received, buf[:n])
 

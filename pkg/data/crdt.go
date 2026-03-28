@@ -60,7 +60,6 @@ func (c *GCounter) Value() uint64 {
 	return total
 }
 
-// Merge applies the join semilattice operation: max(local[k], remote[k]) for each node k.
 func (c *GCounter) Merge(other map[string]uint64) error {
 	if other == nil {
 		return ErrNilState
@@ -77,7 +76,6 @@ func (c *GCounter) Merge(other map[string]uint64) error {
 	return nil
 }
 
-// MergeIter merges from an iterator without requiring the caller to allocate a map snapshot.
 func (c *GCounter) MergeIter(seq iter.Seq2[string, uint64]) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
