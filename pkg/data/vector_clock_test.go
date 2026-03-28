@@ -39,9 +39,7 @@ func TestVectorClock_IncrementOverflow(t *testing.T) {
 	t.Parallel()
 
 	vc := NewVectorClock()
-	if err := vc.Set("node1", math.MaxUint64); err != nil {
-		t.Fatalf("Set() failed: %v", err)
-	}
+	_ = vc.Set("node1", math.MaxUint64)
 
 	err := vc.Increment("node1")
 	if !errors.Is(err, ErrOverflow) {
@@ -56,10 +54,7 @@ func TestVectorClock_Merge(t *testing.T) {
 	_ = vc.Increment("node1")
 	_ = vc.Increment("node1")
 
-	other := map[string]uint64{
-		"node1": 1,
-		"node2": 5,
-	}
+	other := map[string]uint64{"node1": 1, "node2": 5}
 
 	if err := vc.Merge(other); err != nil {
 		t.Fatalf("Merge() error = %v", err)
@@ -77,14 +72,12 @@ func TestVectorClock_MergeNil(t *testing.T) {
 	t.Parallel()
 
 	vc := NewVectorClock()
-	err := vc.Merge(nil)
-
-	if !errors.Is(err, ErrNilState) {
+	if err := vc.Merge(nil); !errors.Is(err, ErrNilState) {
 		t.Errorf("expected ErrNilState, got %v", err)
 	}
 }
 
-func TestCompare_Ordering(t *testing.T) {
+func TestVectorClock_Compare_Ordering(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -93,50 +86,20 @@ func TestCompare_Ordering(t *testing.T) {
 		vc2  map[string]uint64
 		want Ordering
 	}{
-		{
-			name: "equal clocks",
-			vc1:  map[string]uint64{"node1": 5, "node2": 3},
-			vc2:  map[string]uint64{"node1": 5, "node2": 3},
-			want: Equal,
-		},
-		{
-			name: "vc1 before vc2",
-			vc1:  map[string]uint64{"node1": 3, "node2": 2},
-			vc2:  map[string]uint64{"node1": 5, "node2": 4},
-			want: Before,
-		},
-		{
-			name: "vc1 after vc2",
-			vc1:  map[string]uint64{"node1": 5, "node2": 4},
-			vc2:  map[string]uint64{"node1": 3, "node2": 2},
-			want: After,
-		},
-		{
-			name: "concurrent events",
-			vc1:  map[string]uint64{"node1": 5, "node2": 2},
-			vc2:  map[string]uint64{"node1": 3, "node2": 4},
-			want: Concurrent,
-		},
-		{
-			name: "both nil",
-			vc1:  nil,
-			vc2:  nil,
-			want: Equal,
-		},
-		{
-			name: "vc1 nil",
-			vc1:  nil,
-			vc2:  map[string]uint64{"node1": 1},
-			want: Concurrent,
-		},
+		{"equal", map[string]uint64{"n1": 5, "n2": 3}, map[string]uint64{"n1": 5, "n2": 3}, Equal},
+		{"before", map[string]uint64{"n1": 3, "n2": 2}, map[string]uint64{"n1": 5, "n2": 4}, Before},
+		{"after", map[string]uint64{"n1": 5, "n2": 4}, map[string]uint64{"n1": 3, "n2": 2}, After},
+		{"concurrent", map[string]uint64{"n1": 5, "n2": 2}, map[string]uint64{"n1": 3, "n2": 4}, Concurrent},
+		{"both nil", nil, nil, Equal},
+		{"vc1 nil", nil, map[string]uint64{"n1": 1}, Concurrent},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := Compare(tt.vc1, tt.vc2)
+			got := CompareRaw(tt.vc1, tt.vc2)
 			if got != tt.want {
-				t.Errorf("Compare() = %v, want %v", got, tt.want)
+				t.Errorf("CompareRaw() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -155,7 +118,6 @@ func TestVectorClock_HappensBefore(t *testing.T) {
 	if !vc1.HappensBefore(vc2) {
 		t.Error("expected vc1 to happen before vc2")
 	}
-
 	if vc2.HappensBefore(vc1) {
 		t.Error("vc2 should not happen before vc1")
 	}
@@ -218,20 +180,6 @@ func TestVectorClock_GetClocks_IsolationCopy(t *testing.T) {
 	}
 }
 
-func TestVectorClock_Reset(t *testing.T) {
-	t.Parallel()
-
-	vc := NewVectorClock()
-	_ = vc.Increment("node1")
-	_ = vc.Increment("node2")
-
-	vc.Reset()
-
-	if vc.Get("node1") != 0 || vc.Get("node2") != 0 {
-		t.Error("Reset() did not clear all clocks")
-	}
-}
-
 func TestOrdering_String(t *testing.T) {
 	t.Parallel()
 
@@ -253,49 +201,25 @@ func TestOrdering_String(t *testing.T) {
 	}
 }
 
-func TestNewVectorClockWithCapacity(t *testing.T) {
-	t.Parallel()
-
-	vc := NewVectorClockWithCapacity(10)
-	if vc == nil {
-		t.Fatal("NewVectorClockWithCapacity() returned nil")
-	}
-
-	_ = vc.Increment("node1")
-	if vc.Get("node1") != 1 {
-		t.Error("NewVectorClockWithCapacity() did not work correctly")
-	}
-}
-
-// Benchmark tests
 func BenchmarkVectorClock_Increment(b *testing.B) {
 	vc := NewVectorClock()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = vc.Increment("node1")
 	}
 }
 
 func BenchmarkVectorClock_Merge(b *testing.B) {
 	vc := NewVectorClock()
-	other := map[string]uint64{
-		"node1": 10,
-		"node2": 20,
-		"node3": 30,
-	}
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
+	other := map[string]uint64{"n1": 10, "n2": 20, "n3": 30}
+	for b.Loop() {
 		_ = vc.Merge(other)
 	}
 }
 
-func BenchmarkCompare(b *testing.B) {
-	vc1 := map[string]uint64{"node1": 5, "node2": 3, "node3": 8}
-	vc2 := map[string]uint64{"node1": 3, "node2": 7, "node3": 2}
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_ = Compare(vc1, vc2)
+func BenchmarkCompareRaw(b *testing.B) {
+	vc1 := map[string]uint64{"n1": 5, "n2": 3, "n3": 8}
+	vc2 := map[string]uint64{"n1": 3, "n2": 7, "n3": 2}
+	for b.Loop() {
+		_ = CompareRaw(vc1, vc2)
 	}
 }

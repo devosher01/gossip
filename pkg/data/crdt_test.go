@@ -16,24 +16,9 @@ func TestGCounter_Increment(t *testing.T) {
 		delta   uint64
 		wantErr error
 	}{
-		{
-			name:    "valid increment",
-			nodeID:  "node1",
-			delta:   5,
-			wantErr: nil,
-		},
-		{
-			name:    "empty node ID",
-			nodeID:  "",
-			delta:   1,
-			wantErr: ErrInvalidNodeID,
-		},
-		{
-			name:    "zero delta",
-			nodeID:  "node1",
-			delta:   0,
-			wantErr: ErrInvalidDelta,
-		},
+		{"valid increment", "node1", 5, nil},
+		{"empty node ID", "", 1, ErrInvalidNodeID},
+		{"zero delta", "node1", 0, ErrInvalidDelta},
 	}
 
 	for _, tt := range tests {
@@ -76,14 +61,13 @@ func TestGCounter_Value(t *testing.T) {
 	_ = c.Increment("node3", 5)
 
 	if got := c.Value(); got != 35 {
-		t.Errorf("Value() = %d, want %d", got, 35)
+		t.Errorf("Value() = %d, want 35", got)
 	}
 }
 
 func TestGCounter_Merge_Commutativity(t *testing.T) {
 	t.Parallel()
 
-	// Create two counters with different states
 	c1 := NewGCounter()
 	_ = c1.Increment("node1", 10)
 	_ = c1.Increment("node2", 5)
@@ -92,24 +76,54 @@ func TestGCounter_Merge_Commutativity(t *testing.T) {
 	_ = c2.Increment("node1", 8)
 	_ = c2.Increment("node3", 15)
 
-	// Merge c2 into c1
-	c1Copy := NewGCounter()
-	_ = c1Copy.Merge(c1.GetState())
-	_ = c1Copy.Merge(c2.GetState())
+	// merge(c1, c2)
+	forward := NewGCounter()
+	_ = forward.Merge(c1.GetState())
+	_ = forward.Merge(c2.GetState())
 
-	// Merge c1 into c2 (reverse order)
-	c2Copy := NewGCounter()
-	_ = c2Copy.Merge(c2.GetState())
-	_ = c2Copy.Merge(c1.GetState())
+	// merge(c2, c1)
+	reverse := NewGCounter()
+	_ = reverse.Merge(c2.GetState())
+	_ = reverse.Merge(c1.GetState())
 
-	// Both should converge to the same value
-	if c1Copy.Value() != c2Copy.Value() {
-		t.Errorf("merge not commutative: c1Copy=%d, c2Copy=%d", c1Copy.Value(), c2Copy.Value())
+	if forward.Value() != reverse.Value() {
+		t.Errorf("commutativity violated: %d != %d", forward.Value(), reverse.Value())
 	}
 
-	// Verify expected state: max(10,8) + max(5,0) + max(0,15) = 10 + 5 + 15 = 30
-	if got := c1Copy.Value(); got != 30 {
-		t.Errorf("merged value = %d, want %d", got, 30)
+	// max(10,8) + max(5,0) + max(0,15) = 30
+	if got := forward.Value(); got != 30 {
+		t.Errorf("merged value = %d, want 30", got)
+	}
+}
+
+func TestGCounter_Merge_Associativity(t *testing.T) {
+	t.Parallel()
+
+	a := NewGCounter()
+	_ = a.Increment("n1", 3)
+
+	b := NewGCounter()
+	_ = b.Increment("n2", 7)
+
+	c := NewGCounter()
+	_ = c.Increment("n3", 11)
+
+	// (a merge b) merge c
+	left := NewGCounter()
+	_ = left.Merge(a.GetState())
+	_ = left.Merge(b.GetState())
+	_ = left.Merge(c.GetState())
+
+	// a merge (b merge c)
+	right := NewGCounter()
+	bc := NewGCounter()
+	_ = bc.Merge(b.GetState())
+	_ = bc.Merge(c.GetState())
+	_ = right.Merge(a.GetState())
+	_ = right.Merge(bc.GetState())
+
+	if left.Value() != right.Value() {
+		t.Errorf("associativity violated: %d != %d", left.Value(), right.Value())
 	}
 }
 
@@ -121,7 +135,6 @@ func TestGCounter_Merge_Idempotency(t *testing.T) {
 
 	state := c.GetState()
 
-	// Merge the same state multiple times
 	_ = c.Merge(state)
 	val1 := c.Value()
 
@@ -129,7 +142,7 @@ func TestGCounter_Merge_Idempotency(t *testing.T) {
 	val2 := c.Value()
 
 	if val1 != val2 {
-		t.Errorf("merge not idempotent: first=%d, second=%d", val1, val2)
+		t.Errorf("idempotency violated: %d != %d", val1, val2)
 	}
 }
 
@@ -137,9 +150,7 @@ func TestGCounter_Merge_NilState(t *testing.T) {
 	t.Parallel()
 
 	c := NewGCounter()
-	err := c.Merge(nil)
-
-	if !errors.Is(err, ErrNilState) {
+	if err := c.Merge(nil); !errors.Is(err, ErrNilState) {
 		t.Errorf("expected ErrNilState, got %v", err)
 	}
 }
@@ -148,27 +159,24 @@ func TestGCounter_ConcurrentIncrements(t *testing.T) {
 	t.Parallel()
 
 	c := NewGCounter()
-	const (
-		numGoroutines          = 100
-		incrementsPerGoroutine = 100
-	)
+	const goroutines = 100
+	const ops = 100
 
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
+	wg.Add(goroutines)
 
-	for i := 0; i < numGoroutines; i++ {
-		go func(id int) {
+	for range goroutines {
+		go func() {
 			defer wg.Done()
-			nodeID := "node1"
-			for j := 0; j < incrementsPerGoroutine; j++ {
-				_ = c.Increment(nodeID, 1)
+			for range ops {
+				_ = c.Increment("node1", 1)
 			}
-		}(i)
+		}()
 	}
 
 	wg.Wait()
 
-	expected := uint64(numGoroutines * incrementsPerGoroutine)
+	expected := uint64(goroutines * ops)
 	if got := c.Value(); got != expected {
 		t.Errorf("concurrent increments: got %d, want %d", got, expected)
 	}
@@ -181,11 +189,10 @@ func TestGCounter_GetState_IsolationCopy(t *testing.T) {
 	_ = c.Increment("node1", 10)
 
 	state := c.GetState()
-	state["node1"] = 999 // Mutate returned state
+	state["node1"] = 999
 
-	// Original counter should not be affected
 	if c.GetNodeValue("node1") != 10 {
-		t.Errorf("GetState() did not return isolated copy")
+		t.Error("GetState() did not return isolated copy")
 	}
 }
 
@@ -198,76 +205,36 @@ func TestGCounter_NodeCount(t *testing.T) {
 	_ = c.Increment("node3", 1)
 
 	if got := c.NodeCount(); got != 3 {
-		t.Errorf("NodeCount() = %d, want %d", got, 3)
+		t.Errorf("NodeCount() = %d, want 3", got)
 	}
 }
 
-func TestGCounter_Reset(t *testing.T) {
-	t.Parallel()
-
-	c := NewGCounter()
-	_ = c.Increment("node1", 10)
-	_ = c.Increment("node2", 20)
-
-	c.Reset()
-
-	if got := c.Value(); got != 0 {
-		t.Errorf("Reset() failed: Value() = %d, want 0", got)
-	}
-
-	if got := c.NodeCount(); got != 0 {
-		t.Errorf("Reset() failed: NodeCount() = %d, want 0", got)
-	}
-}
-
-func TestNewGCounterWithCapacity(t *testing.T) {
-	t.Parallel()
-
-	c := NewGCounterWithCapacity(100)
-	if c == nil {
-		t.Fatal("NewGCounterWithCapacity returned nil")
-	}
-
-	// Verify it works normally
-	_ = c.Increment("node1", 5)
-	if c.Value() != 5 {
-		t.Errorf("Value() = %d, want 5", c.Value())
-	}
-}
-
-// Benchmark tests
 func BenchmarkGCounter_Increment(b *testing.B) {
 	c := NewGCounter()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = c.Increment("node1", 1)
 	}
 }
 
 func BenchmarkGCounter_Value(b *testing.B) {
 	c := NewGCounter()
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		_ = c.Increment("node1", 1)
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = c.Value()
 	}
 }
 
 func BenchmarkGCounter_Merge(b *testing.B) {
-	c1 := NewGCounter()
-	c2 := NewGCounter()
-
-	for i := 0; i < 100; i++ {
-		_ = c2.Increment("node1", 1)
+	c := NewGCounter()
+	other := NewGCounter()
+	for range 100 {
+		_ = other.Increment("node1", 1)
 	}
-
-	state := c2.GetState()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_ = c1.Merge(state)
+	state := other.GetState()
+	for b.Loop() {
+		_ = c.Merge(state)
 	}
 }
 

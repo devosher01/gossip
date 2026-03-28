@@ -1,7 +1,9 @@
 package membership
 
 import (
+	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -9,21 +11,15 @@ func TestNewList(t *testing.T) {
 	t.Parallel()
 
 	l := NewList("127.0.0.1:8000")
-	if l == nil {
-		t.Fatal("NewList returned nil")
-	}
-
-	members := l.GetMembers()
+	members := l.Snapshot()
 	if len(members) != 1 {
-		t.Errorf("expected 1 member, got %d", len(members))
+		t.Fatalf("expected 1 member, got %d", len(members))
 	}
-
 	if members[0].Addr != "127.0.0.1:8000" {
 		t.Errorf("expected self addr, got %s", members[0].Addr)
 	}
-
 	if members[0].Status != Alive {
-		t.Errorf("expected Alive status, got %v", members[0].Status)
+		t.Errorf("expected Alive, got %v", members[0].Status)
 	}
 }
 
@@ -33,9 +29,8 @@ func TestUpdateHeartbeat_NewMember(t *testing.T) {
 	l := NewList("127.0.0.1:8000")
 	l.UpdateHeartbeat("127.0.0.1:8001", 1)
 
-	members := l.GetMembers()
-	if len(members) != 2 {
-		t.Errorf("expected 2 members, got %d", len(members))
+	if len(l.Snapshot()) != 2 {
+		t.Errorf("expected 2 members, got %d", len(l.Snapshot()))
 	}
 }
 
@@ -46,21 +41,16 @@ func TestUpdateHeartbeat_UpdateExisting(t *testing.T) {
 	l.UpdateHeartbeat("127.0.0.1:8001", 1)
 	l.UpdateHeartbeat("127.0.0.1:8001", 2)
 
-	members := l.GetMembers()
-	found := false
-	for _, m := range members {
-		if m.Addr == "127.0.0.1:8001" {
-			found = true
-			if m.Heartbeat != 2 {
-				t.Errorf("expected heartbeat 2, got %d", m.Heartbeat)
-			}
-			if m.Status != Alive {
-				t.Errorf("expected Alive status, got %v", m.Status)
-			}
-		}
+	members := l.Snapshot()
+	idx := slices.IndexFunc(members, func(m Member) bool { return m.Addr == "127.0.0.1:8001" })
+	if idx == -1 {
+		t.Fatal("member not found")
 	}
-	if !found {
-		t.Error("member not found")
+	if members[idx].Heartbeat != 2 {
+		t.Errorf("expected heartbeat 2, got %d", members[idx].Heartbeat)
+	}
+	if members[idx].Status != Alive {
+		t.Errorf("expected Alive, got %v", members[idx].Status)
 	}
 }
 
@@ -70,46 +60,11 @@ func TestMarkSuspect(t *testing.T) {
 	l := NewList("127.0.0.1:8000")
 	l.UpdateHeartbeat("127.0.0.1:8001", 1)
 
-	ok := l.MarkSuspect("127.0.0.1:8001")
-	if !ok {
+	if !l.MarkSuspect("127.0.0.1:8001") {
 		t.Error("MarkSuspect returned false")
 	}
-
-	members := l.GetAllMembers()
-	for _, m := range members {
-		if m.Addr == "127.0.0.1:8001" && m.Status != Suspect {
-			t.Errorf("expected Suspect status, got %v", m.Status)
-		}
-	}
-}
-
-func TestMarkSuspect_NonExistent(t *testing.T) {
-	t.Parallel()
-
-	l := NewList("127.0.0.1:8000")
-	ok := l.MarkSuspect("127.0.0.1:9999")
-	if ok {
+	if l.MarkSuspect("127.0.0.1:9999") {
 		t.Error("MarkSuspect should return false for non-existent member")
-	}
-}
-
-func TestMarkDead(t *testing.T) {
-	t.Parallel()
-
-	l := NewList("127.0.0.1:8000")
-	l.UpdateHeartbeat("127.0.0.1:8001", 1)
-	l.MarkSuspect("127.0.0.1:8001")
-
-	ok := l.MarkDead("127.0.0.1:8001")
-	if !ok {
-		t.Error("MarkDead returned false")
-	}
-
-	members := l.GetAllMembers()
-	for _, m := range members {
-		if m.Addr == "127.0.0.1:8001" && m.Status != Dead {
-			t.Errorf("expected Dead status, got %v", m.Status)
-		}
 	}
 }
 
@@ -119,14 +74,17 @@ func TestMarkDead_RequiresSuspect(t *testing.T) {
 	l := NewList("127.0.0.1:8000")
 	l.UpdateHeartbeat("127.0.0.1:8001", 1)
 
-	// Try to mark as Dead without going through Suspect
-	ok := l.MarkDead("127.0.0.1:8001")
-	if ok {
-		t.Error("MarkDead should require Suspect state first")
+	if l.MarkDead("127.0.0.1:8001") {
+		t.Error("MarkDead should require Suspect state")
+	}
+
+	l.MarkSuspect("127.0.0.1:8001")
+	if !l.MarkDead("127.0.0.1:8001") {
+		t.Error("MarkDead returned false after MarkSuspect")
 	}
 }
 
-func TestGetMembers_ExcludesDead(t *testing.T) {
+func TestSnapshot_ExcludesDead(t *testing.T) {
 	t.Parallel()
 
 	l := NewList("127.0.0.1:8000")
@@ -134,15 +92,30 @@ func TestGetMembers_ExcludesDead(t *testing.T) {
 	l.MarkSuspect("127.0.0.1:8001")
 	l.MarkDead("127.0.0.1:8001")
 
-	members := l.GetMembers()
-	for _, m := range members {
+	for _, m := range l.Snapshot() {
 		if m.Status == Dead {
-			t.Error("GetMembers should exclude Dead members")
+			t.Error("Snapshot should exclude Dead members")
 		}
 	}
 }
 
-func TestGetAllMembers_IncludesDead(t *testing.T) {
+func TestAll_Iterator(t *testing.T) {
+	t.Parallel()
+
+	l := NewList("127.0.0.1:8000")
+	l.UpdateHeartbeat("127.0.0.1:8001", 1)
+	l.UpdateHeartbeat("127.0.0.1:8002", 1)
+
+	count := 0
+	for range l.All() {
+		count++
+	}
+	if count != 3 {
+		t.Errorf("All() yielded %d members, want 3", count)
+	}
+}
+
+func TestAll_ExcludesDead(t *testing.T) {
 	t.Parallel()
 
 	l := NewList("127.0.0.1:8000")
@@ -150,65 +123,71 @@ func TestGetAllMembers_IncludesDead(t *testing.T) {
 	l.MarkSuspect("127.0.0.1:8001")
 	l.MarkDead("127.0.0.1:8001")
 
-	members := l.GetAllMembers()
-	foundDead := false
-	for _, m := range members {
-		if m.Addr == "127.0.0.1:8001" && m.Status == Dead {
-			foundDead = true
+	for m := range l.All() {
+		if m.Status == Dead {
+			t.Error("All() should exclude Dead members")
 		}
 	}
-	if !foundDead {
-		t.Error("GetAllMembers should include Dead members")
-	}
 }
 
-func TestUpdateMemberStatus_StateMachine(t *testing.T) {
-	t.Parallel()
+// Tick tests use synctest to avoid time.Sleep and eliminate flakiness.
+// synctest provides a fake clock that only advances when all goroutines are blocked,
+// making time-dependent tests deterministic.
+func TestTick_StateMachine(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := NewList("127.0.0.1:8000")
+		l.UpdateHeartbeat("127.0.0.1:8001", 1)
 
-	l := NewList("127.0.0.1:8000")
-	l.UpdateHeartbeat("127.0.0.1:8001", 1)
+		// Advance past suspect timeout
+		time.Sleep(6 * time.Second)
+		l.Tick(5*time.Second, 10*time.Second, 30*time.Second)
 
-	// Simulate time passing - should transition to Suspect
-	time.Sleep(10 * time.Millisecond)
-	l.UpdateMemberStatus(5*time.Millisecond, 5*time.Millisecond, 5*time.Millisecond)
+		_, suspect, _ := l.Count()
+		if suspect != 1 {
+			t.Errorf("expected 1 suspect, got %d", suspect)
+		}
 
-	alive, suspect, dead := l.Count()
-	if suspect != 1 {
-		t.Errorf("expected 1 suspect member, got %d", suspect)
-	}
+		// Advance past dead timeout
+		time.Sleep(11 * time.Second)
+		l.Tick(5*time.Second, 10*time.Second, 30*time.Second)
 
-	// Simulate more time - should transition to Dead
-	time.Sleep(10 * time.Millisecond)
-	l.UpdateMemberStatus(5*time.Millisecond, 5*time.Millisecond, 5*time.Millisecond)
+		_, _, dead := l.Count()
+		if dead != 1 {
+			t.Errorf("expected 1 dead, got %d", dead)
+		}
 
-	alive, suspect, dead = l.Count()
-	if dead != 1 {
-		t.Errorf("expected 1 dead member, got %d (alive=%d, suspect=%d)", dead, alive, suspect)
-	}
+		// Advance past remove timeout
+		time.Sleep(31 * time.Second)
+		l.Tick(5*time.Second, 10*time.Second, 30*time.Second)
 
-	// Simulate even more time - should be removed
-	time.Sleep(10 * time.Millisecond)
-	l.UpdateMemberStatus(5*time.Millisecond, 5*time.Millisecond, 5*time.Millisecond)
-
-	members := l.GetAllMembers()
-	if len(members) != 1 { // Only self should remain
-		t.Errorf("expected 1 member (self), got %d", len(members))
-	}
+		alive, suspect, dead := l.Count()
+		if alive != 1 || suspect != 0 || dead != 0 {
+			t.Errorf("expected only self remaining: alive=%d suspect=%d dead=%d", alive, suspect, dead)
+		}
+	})
 }
 
-func TestRemoveDead_BackwardCompatibility(t *testing.T) {
-	t.Parallel()
+func TestTick_HeartbeatRevivesSuspect(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := NewList("127.0.0.1:8000")
+		l.UpdateHeartbeat("127.0.0.1:8001", 1)
 
-	l := NewList("127.0.0.1:8000")
-	l.UpdateHeartbeat("127.0.0.1:8001", 1)
+		time.Sleep(6 * time.Second)
+		l.Tick(5*time.Second, 10*time.Second, 30*time.Second)
 
-	time.Sleep(10 * time.Millisecond)
-	l.RemoveDead(5 * time.Millisecond)
+		_, suspect, _ := l.Count()
+		if suspect != 1 {
+			t.Fatalf("expected 1 suspect, got %d", suspect)
+		}
 
-	members := l.GetMembers()
-	if len(members) != 1 {
-		t.Errorf("expected 1 member, got %d", len(members))
-	}
+		// New heartbeat should revive the member
+		l.UpdateHeartbeat("127.0.0.1:8001", 2)
+
+		alive, suspect, _ := l.Count()
+		if alive != 2 || suspect != 0 {
+			t.Errorf("heartbeat should revive: alive=%d suspect=%d", alive, suspect)
+		}
+	})
 }
 
 func TestCount(t *testing.T) {
@@ -224,28 +203,28 @@ func TestCount(t *testing.T) {
 	l.MarkDead("127.0.0.1:8002")
 
 	alive, suspect, dead := l.Count()
-	if alive != 2 { // self + 8003
+	if alive != 2 {
 		t.Errorf("expected 2 alive, got %d", alive)
 	}
-	if suspect != 1 { // 8001
+	if suspect != 1 {
 		t.Errorf("expected 1 suspect, got %d", suspect)
 	}
-	if dead != 1 { // 8002
+	if dead != 1 {
 		t.Errorf("expected 1 dead, got %d", dead)
 	}
 }
 
-func TestMemberStatus_String(t *testing.T) {
+func TestStatus_String(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		status MemberStatus
+		status Status
 		want   string
 	}{
 		{Alive, "alive"},
 		{Suspect, "suspect"},
 		{Dead, "dead"},
-		{MemberStatus(99), "unknown"},
+		{Status(99), "unknown"},
 	}
 
 	for _, tt := range tests {
@@ -255,22 +234,21 @@ func TestMemberStatus_String(t *testing.T) {
 	}
 }
 
-// Benchmark tests
 func BenchmarkUpdateHeartbeat(b *testing.B) {
 	l := NewList("127.0.0.1:8000")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		l.UpdateHeartbeat("127.0.0.1:8001", uint64(i))
+	var i uint64
+	for b.Loop() {
+		i++
+		l.UpdateHeartbeat("127.0.0.1:8001", i)
 	}
 }
 
-func BenchmarkGetMembers(b *testing.B) {
+func BenchmarkSnapshot(b *testing.B) {
 	l := NewList("127.0.0.1:8000")
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		l.UpdateHeartbeat("127.0.0.1:800"+string(rune(i)), 1)
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = l.GetMembers()
+	for b.Loop() {
+		_ = l.Snapshot()
 	}
 }

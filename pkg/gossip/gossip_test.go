@@ -1,8 +1,7 @@
 package gossip_test
 
 import (
-	"context"
-	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -10,39 +9,64 @@ import (
 )
 
 func TestGossipConvergence(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	if testing.Short() {
+		t.Skip("skipping integration test with real UDP")
+	}
 
-	// Create 3 nodes
-	node1, _ := gossip.NewNode("node1", 8001)
-	node2, _ := gossip.NewNode("node2", 8002)
-	node3, _ := gossip.NewNode("node3", 8003)
+	log := slog.Default()
 
-	// Connect them in a chain: 1 -> 2 -> 3
-	node1.Members.UpdateHeartbeat(node2.Addr, 0)
-	node2.Members.UpdateHeartbeat(node3.Addr, 0)
+	nodes := make([]*gossip.Node, 3)
+	for i := range 3 {
+		cfg := gossip.DefaultConfig(
+			"node"+string(rune('1'+i)),
+			9001+i,
+		)
+		cfg.GossipInterval = 100 * time.Millisecond
+		cfg.Logger = log
 
-	node1.Start(ctx)
-	node2.Start(ctx)
-	node3.Start(ctx)
+		var err error
+		nodes[i], err = gossip.NewNode(cfg)
+		if err != nil {
+			t.Fatalf("create node %d: %v", i, err)
+		}
+		defer nodes[i].Stop()
+	}
 
-	// Increment some values
-	_ = node1.Increment()
-	_ = node1.Increment()
-	_ = node2.Increment()
-	_ = node3.Increment()
+	// Chain topology: node1 -> node2 -> node3
+	// Gossip protocol guarantees full mesh discovery through transitive propagation
+	nodes[0].Members.UpdateHeartbeat(nodes[1].Addr, 0)
+	nodes[1].Members.UpdateHeartbeat(nodes[2].Addr, 0)
 
-	// Expected total = 4
-	fmt.Println("Waiting for convergence...")
-	time.Sleep(10 * time.Second)
+	ctx := t.Context()
 
-	v1 := node1.Counter.Value()
-	v2 := node2.Counter.Value()
-	v3 := node3.Counter.Value()
+	for _, n := range nodes {
+		n.Start(ctx)
+	}
 
-	if v1 != 4 || v2 != 4 || v3 != 4 {
-		t.Errorf("Nodes did not converge to 4. Node1: %d, Node2: %d, Node3: %d", v1, v2, v3)
-	} else {
-		fmt.Printf("Convergence achieved: All nodes have counter = %d\n", v1)
+	_ = nodes[0].Increment()
+	_ = nodes[0].Increment()
+	_ = nodes[1].Increment()
+	_ = nodes[2].Increment()
+
+	deadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("convergence timeout: node1=%d node2=%d node3=%d",
+				nodes[0].Counter.Value(),
+				nodes[1].Counter.Value(),
+				nodes[2].Counter.Value(),
+			)
+		case <-ticker.C:
+			v0 := nodes[0].Counter.Value()
+			v1 := nodes[1].Counter.Value()
+			v2 := nodes[2].Counter.Value()
+			if v0 == 4 && v1 == 4 && v2 == 4 {
+				return
+			}
+		}
 	}
 }
