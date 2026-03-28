@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"sync"
 	"time"
 
@@ -63,17 +64,18 @@ func DefaultConfig(id string, port int) Config {
 }
 
 type Node struct {
-	ID        string
-	Addr      string
-	Transport network.Transport
-	Members   *membership.List
-	Counter   *data.GCounter
-	Clocks    *data.VectorClock
+	ID      string
+	Addr    string
+	Members *membership.List
+	Counter *data.GCounter
+	Clocks  *data.VectorClock
 
-	cfg    Config
-	log    *slog.Logger
-	cancel context.CancelFunc
-	mu     sync.Mutex
+	transport network.Transport
+	stats     Stats
+	cfg       Config
+	log       *slog.Logger
+	cancel    context.CancelFunc
+	mu        sync.Mutex
 
 	// heartbeatSeq is a monotonic counter incremented each gossip tick.
 	// Using a sequence number instead of wall clock avoids issues with
@@ -96,7 +98,7 @@ func NewNode(cfg Config) (*Node, error) {
 	return &Node{
 		ID:        cfg.ID,
 		Addr:      addr,
-		Transport: transport,
+		transport: transport,
 		Members:   membership.NewList(addr),
 		Counter:   data.NewGCounter(),
 		Clocks:    data.NewVectorClock(),
@@ -115,7 +117,15 @@ func (n *Node) Stop() error {
 	if n.cancel != nil {
 		n.cancel()
 	}
-	return n.Transport.Close()
+	return n.transport.Close()
+}
+
+func (n *Node) Stats() StatsSnapshot {
+	return n.stats.Snapshot()
+}
+
+func (n *Node) LocalAddr() net.Addr {
+	return n.transport.LocalAddr()
 }
 
 func (n *Node) listen(ctx context.Context) {
@@ -126,7 +136,7 @@ func (n *Node) listen(ctx context.Context) {
 		default:
 		}
 
-		_, buf, err := n.Transport.Receive(ctx)
+		_, buf, err := n.transport.Receive(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -134,8 +144,12 @@ func (n *Node) listen(ctx context.Context) {
 			continue
 		}
 
+		n.stats.MessagesReceived.Add(1)
+		n.stats.BytesReceived.Add(uint64(len(buf)))
+
 		var env Envelope
 		if err := json.Unmarshal(buf, &env); err != nil {
+			n.stats.MalformedMessages.Add(1)
 			n.log.Warn("malformed envelope", "error", err)
 			continue
 		}
@@ -146,6 +160,7 @@ func (n *Node) listen(ctx context.Context) {
 		case DataSync:
 			n.handleData(env.Sender, env.Payload)
 		default:
+			n.stats.MalformedMessages.Add(1)
 			n.log.Warn("unknown message type", "type", env.Type)
 		}
 	}
@@ -154,6 +169,7 @@ func (n *Node) listen(ctx context.Context) {
 func (n *Node) handleMembership(payload json.RawMessage) {
 	var p MembershipPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		n.stats.MalformedMessages.Add(1)
 		n.log.Warn("malformed membership payload", "error", err)
 		return
 	}
@@ -165,6 +181,7 @@ func (n *Node) handleMembership(payload json.RawMessage) {
 func (n *Node) handleData(sender string, payload json.RawMessage) {
 	var p DataPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		n.stats.MalformedMessages.Add(1)
 		n.log.Warn("malformed data payload", "error", err)
 		return
 	}
@@ -184,6 +201,7 @@ func (n *Node) handleData(sender string, payload json.RawMessage) {
 
 	_ = n.Clocks.Merge(p.Clocks)
 	_ = n.Counter.Merge(p.State)
+	n.stats.MergesPerformed.Add(1)
 }
 
 func (n *Node) gossipLoop(ctx context.Context) {
@@ -203,6 +221,7 @@ func (n *Node) gossipLoop(ctx context.Context) {
 			n.Members.UpdateHeartbeat(n.Addr, seq)
 			n.Members.Tick(n.cfg.SuspectTimeout, n.cfg.DeadTimeout, n.cfg.RemoveTimeout)
 			n.gossip(ctx)
+			n.stats.GossipRounds.Add(1)
 		}
 	}
 }
@@ -248,7 +267,13 @@ func (n *Node) send(ctx context.Context, addr string, typ MessageType, payload [
 	if err != nil {
 		return err
 	}
-	return n.Transport.Send(ctx, addr, encoded)
+	if err := n.transport.Send(ctx, addr, encoded); err != nil {
+		n.stats.SendErrors.Add(1)
+		return err
+	}
+	n.stats.MessagesSent.Add(1)
+	n.stats.BytesSent.Add(uint64(len(encoded)))
+	return nil
 }
 
 func (n *Node) Increment() error {

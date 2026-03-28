@@ -48,12 +48,17 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			alive, suspect, dead := node.Members.Count()
+			stats := node.Stats()
 			log.Info("status",
 				"counter", node.Counter.Value(),
 				"alive", alive,
 				"suspect", suspect,
 				"dead", dead,
 				"clocks", node.Clocks.GetClocks(),
+				"msgs_sent", stats.MessagesSent,
+				"msgs_recv", stats.MessagesReceived,
+				"merges", stats.MergesPerformed,
+				"rounds", stats.GossipRounds,
 			)
 		}
 	}()
