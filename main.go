@@ -35,7 +35,6 @@ func main() {
 
 	fmt.Printf("Node %s started at %s\n", *id, node.Addr)
 
-	// Periodic status print
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		for range ticker.C {
@@ -47,7 +46,6 @@ func main() {
 		}
 	}()
 
-	// Simulate work
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		for range ticker.C {
