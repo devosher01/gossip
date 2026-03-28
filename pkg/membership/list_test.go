@@ -130,8 +130,8 @@ func TestAll_ExcludesDead(t *testing.T) {
 	}
 }
 
-// Tick tests use synctest to avoid time.Sleep and eliminate flakiness.
-// synctest provides a fake clock that only advances when all goroutines are blocked,
+// Tick tests use synctest to avoid time.Sleep and remove flakiness.
+// Synctest provides a fake clock that only advances when all goroutines are blocked,
 // making time-dependent tests deterministic.
 func TestTick_StateMachine(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -180,7 +180,7 @@ func TestTick_HeartbeatRevivesSuspect(t *testing.T) {
 			t.Fatalf("expected 1 suspect, got %d", suspect)
 		}
 
-		// New heartbeat should revive the member
+		// A new heartbeat should revive the member
 		l.UpdateHeartbeat("127.0.0.1:8001", 2)
 
 		alive, suspect, _ := l.Count()

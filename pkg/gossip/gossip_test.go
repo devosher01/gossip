@@ -22,7 +22,12 @@ func makeTestNode(t *testing.T, id string, port int) *gossip.Node {
 	if err != nil {
 		t.Fatalf("create node %s: %v", id, err)
 	}
-	t.Cleanup(func() { node.Stop() })
+	t.Cleanup(func() {
+		err := node.Stop()
+		if err != nil {
+			return
+		}
+	})
 	return node
 }
 
@@ -98,7 +103,7 @@ func TestPartitionHealing(t *testing.T) {
 	}
 
 	// Two isolated clusters that will later be connected.
-	// Validates that CRDT state converges after partition heals
+	// Validates that CRDT state converges after partition healed
 	// without a central coordinator — the core gossip guarantee.
 	nodeA := makeTestNode(t, "nodeA", 9010)
 	nodeB := makeTestNode(t, "nodeB", 9011)
